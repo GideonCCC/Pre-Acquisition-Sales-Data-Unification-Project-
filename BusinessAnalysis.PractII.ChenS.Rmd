@@ -1,0 +1,470 @@
+---
+title: "Analysis of Film and Music Sales for Media Distributors, Inc."
+subtitle: "Prepared by Oakland Partners"
+author: "Shaobo Chen"
+date: "Spring 2025 Semester"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    number_sections: true
+    theme: paper
+    highlight: tango
+    code_folding: hide
+---
+
+## Background
+Media Distributors, Inc. is a Wichita, KY based distributor and seller of films and music for commercial purposes. For the past few years, it has managed its film and music sales separately using different applications. This division is historical as Media Distributors started distributing films and then acquired SoundMania about two years ago. As the two distribution channels were different, CTO Alvin Coelho made the decision not to integrate the SoundMania’s information systems and database with those of Media Distributors. This has not been a problem until now, however Media Distributors intends to make itself available for acquisition. To that end, an integrated view of the business, particularly sales, is needed.
+
+This report provides key sales, revenue, and customer metrics to showcase Media Distributors’ business. The analysis provided is based on data from a custom-built datamart that integrates data extracted from two operational databases.
+
+
+```{r setup, include=FALSE}
+# 1) Clear the environment and set chunk options
+rm(list = ls())
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r libraries}
+# Load required libraries
+if (!require("reshape2")) install.packages("reshape2")
+if (!require("kableExtra")) install.packages("kableExtra")
+if (!require("RMySQL")) install.packages("RMySQL")
+
+library(RMySQL)
+library(reshape2)
+library(knitr)
+library(kableExtra)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+```
+
+```{r data_loading}
+# Connect and load data from MySQL
+mydbcon <- dbConnect(
+  RMySQL::MySQL(),
+  dbname   = Sys.getenv("DB_NAME"),
+  host     = Sys.getenv("DB_HOST"),
+  port     = as.integer(Sys.getenv("DB_PORT")),
+  user     = Sys.getenv("DB_USER"),
+  password = Sys.getenv("DB_PASSWORD"),
+  sslmode  = "REQUIRED"
+)
+
+
+fact_sales   <- dbGetQuery(mydbcon, "SELECT * FROM fact_sales;")
+dim_date     <- dbGetQuery(mydbcon, "SELECT * FROM dim_date;")
+dim_country  <- dbGetQuery(mydbcon, "SELECT * FROM dim_country;")
+dim_channel  <- dbGetQuery(mydbcon, "SELECT * FROM dim_channel;")
+fact_customer <- dbGetQuery(mydbcon, "SELECT * FROM fact_customer;")
+invisible(dbDisconnect(mydbcon))
+```
+
+```{r data_merging}
+# Merge fact_sales with dim_date on "date_id" to obtain date details
+fact_joined <- merge(fact_sales, dim_date, by = "date_id", all.x = TRUE)
+
+# Merge with dim_country using store_country_id
+dim_country_store <- dim_country
+names(dim_country_store)[names(dim_country_store) == "country_id"] <- "store_country_id"
+names(dim_country_store)[names(dim_country_store) == "country_name"] <- "store_country_name"
+fact_joined <- merge(fact_joined, dim_country_store, by = "store_country_id", all.x = TRUE)
+
+# Merge with dim_channel
+fact_joined <- merge(fact_joined, dim_channel, by = "channel_id", all.x = TRUE)
+
+# Final joined fact table
+fact_data <- fact_joined
+
+# Merge fact_customer with dim_country to get the country name
+cust_agg <- merge(fact_customer, dim_country, by.x = "customer_country_id", by.y = "country_id", all.x = TRUE)
+
+# Merge with dim_channel to get the business unit (channel) name.
+cust_agg <- merge(cust_agg, dim_channel, by.x = "channel_id", by.y = "channel_id", all.x = TRUE)
+
+# Rename columns for clarity
+names(cust_agg)[names(cust_agg) == "country_name"] <- "customer_country"
+# Use "business_unit" for the channel name so that the table shows Film and Music instead of numeric IDs.
+names(cust_agg)[names(cust_agg) == "channel"] <- "business_unit"
+
+# Define helper function for currency formatting
+format_currency <- function(x) {
+  paste0("$", formatC(x, format = "f", big.mark = ",", digits = 0))
+}
+
+```
+## Key Business Metrics
+This section provides key revenue and customer information segmented by time, country, and business unit. Revenue numbers are in US$.
+
+```{r sales_revenue}
+# Sentence 1: Determine the year with the highest total revenue
+agg_year <- aggregate(total_revenue ~ year, data = fact_data, sum)
+agg_year <- agg_year[order(-agg_year$total_revenue), ]
+year_with_most_sales <- as.character(agg_year$year[1])
+rev_in_that_year <- agg_year$total_revenue[1]
+
+
+# Group by year and country
+agg_year_country <- aggregate(total_revenue ~ year + store_country_name, data = fact_data, sum)
+
+
+# Sentence 2: Find the top row
+agg_year_country <- agg_year_country[order(-agg_year_country$total_revenue), ]
+top_combo <- agg_year_country[1, ]
+
+# Get all countries for that year
+year_data <- subset(fact_data, year == top_combo$year)
+agg_country <- aggregate(total_revenue ~ store_country_name, data = year_data, sum)
+agg_country <- agg_country[order(-agg_country$total_revenue), ]
+
+# Second-best country
+second_country <- agg_country$store_country_name[2]
+second_country_rev <- agg_country$total_revenue[2]
+
+# Sentence 3 & Table 1
+# Table: Top 5 Countries over the 2 most recent years
+recent_years <- sort(unique(fact_data$year), decreasing = TRUE)[1:2]
+country_year <- aggregate(total_revenue ~ store_country_name + year, data = fact_data, sum)
+library(tidyr)
+pivot <- dcast(country_year[country_year$year %in% recent_years, ],
+               store_country_name ~ year, value.var = "total_revenue")
+total_all_time <- aggregate(total_revenue ~ store_country_name, data = fact_data, sum)
+names(total_all_time)[2] <- "Total"
+final_table <- merge(pivot, total_all_time, by = "store_country_name")
+final_table <- final_table[order(-final_table$Total), ][1:5, ]
+
+# Replace NA, format values
+final_table[is.na(final_table)] <- 0
+currency_cols <- names(final_table)[-1]
+final_table[currency_cols] <- lapply(final_table[currency_cols], function(x) {
+  paste0("$", formatC(as.numeric(x), format = "f", big.mark = ",", digits = 0))
+})
+colnames(final_table)[1] <- "Country"
+rownames(final_table) <- NULL
+```
+
+### Sales Revenue
+The year with the most sales was **`r year_with_most_sales`** with a total revenue across both business units of **`r format_currency(rev_in_that_year)`**. The country with the most sales was **`r top_combo$store_country_name`** with total sales across both business units in **`r top_combo$year`** of **`r format_currency(top_combo$total_revenue)`**. It was followed by **`r second_country`** with **`r format_currency(second_country_rev)`**.The table below shows sales revenue by country and ordered by total sales for the two most recent years, **`r recent_years[2]`** and **`r recent_years[1]`**. The table is restricted to the top five countries with the most sales. The column **‘Total’** in the table represents the total for all years for which there is data and not just the past two years.
+
+```{r two_year_revenue_table, results='asis'}
+kable(final_table, "html",
+      caption = "Total Revenue For Top Five Countries For Most Recent Two Years",
+      align = "c") %>%
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = TRUE, position = "left") %>%
+      add_header_above(c(" " = 1, "Revenue Per Year" = 2, " " = 1))
+```
+
+```{r year_range}
+# Extract the minimum and maximum year from the joined fact_data table
+start_year <- min(fact_data$year, na.rm = TRUE)
+end_year   <- max(fact_data$year, na.rm = TRUE)
+```
+The table below shows the revenue broken down by quarter for the top five countries. It shows the total revenue for each quarter across all business units and years. So, for example, the column “Q1” is the total sales for music and film for all years for which there is data, which is from **`r start_year`** to **`r end_year`**.
+
+```{r quarterly_revenue}
+# Aggregate quarterly revenue across all available years and all business units
+quarterly_data <- fact_data %>%
+  # Ensure we work with the full range of years
+  filter(year >= start_year, year <= end_year) %>%
+  group_by(store_country_name, quarter) %>%
+  summarise(total_revenue = sum(total_revenue, na.rm = TRUE)) %>%
+  ungroup()
+
+# Pivot the data: create separate columns for each quarter (Q1 - Q4)
+quarterly_table <- quarterly_data %>%
+  pivot_wider(
+    names_from = quarter,
+    values_from = total_revenue,
+    names_prefix = "Q"
+  ) %>%
+  # Replace any missing quarter values with 0
+  mutate(across(starts_with("Q"), ~ replace_na(.x, 0))) %>%
+  # Calculate cumulative revenue and the average revenue per quarter
+  mutate(
+    Total = Q1 + Q2 + Q3 + Q4,
+    Average = round((Q1 + Q2 + Q3 + Q4) / 4, 0)
+  ) %>%
+  arrange(desc(Total)) %>%
+  # Select the top five countries based on cumulative quarterly revenue
+  slice(1:5) %>%
+  select(Country = store_country_name, Q1, Q2, Q3, Q4, Average)
+
+# Format the numeric columns to include commas for readability
+numeric_cols <- names(quarterly_table)[-1]
+quarterly_table[numeric_cols] <- lapply(quarterly_table[numeric_cols], function(x) {
+  formatC(x, format = "f", big.mark = ",", digits = 0)
+})
+
+# Create a caption dynamically using the start_year and end_year
+caption_text <- paste0("Cumulative and Average Quarterly Revenue<br>Quarterly Revenue ", 
+                       start_year, " to ", end_year)
+
+# Render the table using kableExtra with full-width formatting
+kable(quarterly_table, "html",
+      caption = caption_text,
+      align = c("l", "r", "r", "r", "r", "r")
+) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = TRUE,
+    position = "center"
+  )
+```
+
+```{r customer_distribution_data}
+# Aggregate the total number of customers by country from the combined customer data
+customer_by_country <- cust_agg %>%
+  group_by(customer_country) %>%
+  summarise(total_customers = sum(num_customers, na.rm = TRUE)) %>%
+  arrange(desc(total_customers))
+
+# Total customers (summing over all countries)
+total_customers <- sum(customer_by_country$total_customers, na.rm = TRUE)
+
+# Number of unique countries
+n_countries <- nrow(customer_by_country)
+
+# Identify the top three countries with the most customers
+top_countries_cus <- customer_by_country$customer_country[1:3]
+```
+### Customer Distribution
+Across both business units, there are  **`r total_customers`** customers  **`r n_countries`** countries, with the majority of customers in **`r top_countries_cus[1]`**, **`r top_countries_cus[2]`**, and **`r top_countries_cus[3]`**.
+
+```{r customer_distribution_table}
+# --- Create cust_agg using data from the database ---
+# Merge fact_customer with dim_country to get the country name
+cust_agg <- merge(fact_customer, dim_country, 
+                  by.x = "customer_country_id", 
+                  by.y = "country_id", 
+                  all.x = TRUE)
+
+# Merge with dim_channel to get the business unit (channel) name.
+cust_agg <- merge(cust_agg, dim_channel, 
+                  by = "channel_id", 
+                  all.x = TRUE)
+
+# Rename columns for clarity
+names(cust_agg)[names(cust_agg) == "country_name"] <- "customer_country"
+names(cust_agg)[names(cust_agg) == "channel"] <- "business_unit"
+
+# --- Aggregate Customers by Business Unit ---
+cust_bu <- cust_agg %>%
+  group_by(customer_country, business_unit) %>%
+  summarise(customers = sum(num_customers, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = business_unit,
+              values_from = customers,
+              values_fill = list(customers = 0)) %>%
+  # Compute a Total column (if Film or Music columns are missing, replace with 0)
+  mutate(
+    Total = ifelse(is.na(film), 0, film) + ifelse(is.na(music), 0, music)
+  ) %>%
+  arrange(desc(Total)) %>%
+  slice(1:5) %>%   # Select only the top 5 rows
+  rename(Country = customer_country,
+         Film = film,
+         Music = music)
+
+# If the expected columns do not exist, create them as 0.
+if (!"Film" %in% names(cust_bu)) { cust_bu$Film <- 0 }
+if (!"Music" %in% names(cust_bu)) { cust_bu$Music <- 0 }
+if (!"Total" %in% names(cust_bu)) { cust_bu$Total <- cust_bu$Film + cust_bu$Music }
+
+# Format numeric columns (Film, Music, Total) with commas
+numeric_cols <- c("Film", "Music", "Total")
+cust_bu[numeric_cols] <- lapply(cust_bu[numeric_cols], function(x) {
+  formatC(x, format = "f", big.mark = ",", digits = 0)
+})
+
+# Render the table
+kable(cust_bu, "html",
+      caption = "Customers by Business Unit",
+      align = c("l", "r", "r", "r")
+) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = TRUE, position = "center")
+```
+### Film vs Music Revenue
+Sales fluctuate over time and the table below shows total revenue per year for the years for which we have data.
+```{r music_vs_film}
+# Aggregate total revenue by business unit (channel) and year.
+revenue_by_year <- fact_data %>%
+  group_by(channel, year) %>%
+  summarise(total_rev = sum(total_revenue, na.rm = TRUE), .groups = "drop") %>%
+  arrange(year)
+
+# Pivot the data so that each business unit (e.g., Film, Music) becomes one row, 
+revenue_table <- revenue_by_year %>%
+  pivot_wider(
+    names_from = year,
+    values_from = total_rev,
+    values_fill = list(total_rev = 0)
+  )
+
+# Calculate the Total column as the sum across all year columns.
+year_cols <- setdiff(names(revenue_table), "channel")
+revenue_table <- revenue_table %>%
+  mutate(Total = rowSums(across(all_of(year_cols))))
+
+# Rename the 'channel' column to "Business Unit" for clarity.
+revenue_table <- revenue_table %>%
+  rename(`Business Unit` = channel)
+
+# Order the year columns in ascending order.
+sorted_years <- sort(as.numeric(year_cols))
+sorted_year_cols <- as.character(sorted_years)
+# Reorder the columns: Business Unit, then years, and finally Total.
+revenue_table <- revenue_table %>%
+  select(`Business Unit`, all_of(sorted_year_cols), Total)
+
+# Format all numeric columns with commas for readability.
+numeric_cols <- setdiff(names(revenue_table), "Business Unit")
+revenue_table[numeric_cols] <- lapply(revenue_table[numeric_cols], function(x) {
+  formatC(x, format = "f", big.mark = ",", digits = 0)
+})
+
+# Render the table.
+kable(revenue_table, "html",
+      caption = "Revenue by Year and Business Unit",
+      align = c("l", rep("r", ncol(revenue_table) - 1))
+) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = TRUE, position = "center")
+
+```
+
+The graph below illustrates the quarterly growth of the film and music business over the past years for which we have data.
+```{r plot_table, fig.width=13, fig.height=6}
+# Aggregate total revenue by business unit (channel), year and quarter
+quarterly_growth <- fact_data %>%
+  group_by(channel, year, quarter) %>%
+  summarise(total_rev = sum(total_revenue, na.rm = TRUE), .groups = "drop") %>%
+  mutate(YearQuarter = paste(year, "Q", quarter, sep = "")) %>%
+  # Order the YearQuarter factor in chronological order
+  mutate(YearQuarter = factor(YearQuarter, levels = unique(YearQuarter[order(year, quarter)])))
+
+# Determine the available year range from fact_data
+start_year <- min(fact_data$year, na.rm = TRUE)
+end_year   <- max(fact_data$year, na.rm = TRUE)
+
+# Create the quarterly growth line chart with facet_wrap and free y scales
+ggplot(quarterly_growth, aes(x = YearQuarter, y = total_rev, group = channel, color = channel)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ channel, scales = "free_y") +
+  labs(
+    title = "Quarterly Growth of Film and Music Business",
+    subtitle = paste("Data from", start_year, "to", end_year),
+    x = "Quarter",
+    y = "Total Revenue (US$)",
+    color = "Business Unit"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Number of units sold by country and business unit for past three years.
+```{r sum_table,results='asis'}
+# (1) Compute the most recent three distinct years from fact_data dynamically.
+recent_years <- sort(unique(fact_data$year), decreasing = TRUE)[1:3]
+recent_years <- sort(recent_years)  # sort in ascending order for display
+
+# (2) Filter and aggregate units sold for these recent years.
+units_data <- fact_data %>% 
+  filter(year %in% recent_years) %>%
+  group_by(store_country_name, year, quarter) %>%
+  summarise(total_units = sum(total_units, na.rm = TRUE), .groups = "drop")
+
+# (3) Identify the top three countries by cumulative units sold over these years.
+country_totals <- units_data %>% 
+  group_by(store_country_name) %>% 
+  summarise(TotalUnits = sum(total_units, na.rm = TRUE), .groups = "drop") %>% 
+  arrange(desc(TotalUnits))
+top_countries <- country_totals$store_country_name[1:3]
+
+# (4) Define a function to create the desired table for one country.
+create_units_table <- function(country_name, years) {
+  # Filter for the selected country and convert quarter to character (e.g., "Q1").
+  df <- units_data %>% 
+    filter(store_country_name == country_name) %>%
+    mutate(quarter = paste0("Q", quarter))
+  
+  # Pivot the data so that rows = quarter and columns = each dynamic year.
+  pivot_df <- df %>% 
+    select(year, quarter, total_units) %>% 
+    pivot_wider(names_from = year, values_from = total_units, values_fill = list(total_units = 0))
+  
+  # Ensure that all quarters (Q1, Q2, Q3, Q4) appear and arrange them in the proper order.
+  required_quarters <- c("Q1", "Q2", "Q3", "Q4")
+  pivot_df <- pivot_df %>% 
+    arrange(factor(quarter, levels = required_quarters))
+  
+  # Rename the 'quarter' column to 'Quarter' for consistency.
+  pivot_df <- pivot_df %>% rename(Quarter = quarter)
+  
+  # Compute row Total and Average across the dynamic year columns.
+  pivot_df <- pivot_df %>% 
+    mutate(Total = rowSums(across(all_of(as.character(years)))),
+           Average = round(rowMeans(across(all_of(as.character(years))), na.rm = TRUE), 0))
+  
+  # (a) Create a "Total" row manually.
+  total_vals <- pivot_df %>% summarise(across(all_of(as.character(years)), sum, na.rm = TRUE))
+  overall_total <- sum(unlist(total_vals), na.rm = TRUE)
+  overall_avg <- round(mean(unlist(total_vals), na.rm = TRUE), 0)
+  total_row <- data.frame(Quarter = "Total", stringsAsFactors = FALSE)
+  for(y in as.character(years)){
+    total_row[[y]] <- total_vals[[y]]
+  }
+  total_row$Total <- overall_total
+  total_row$Average <- overall_avg
+  
+  # (b) Create an "Average" row manually.
+  avg_vals <- pivot_df %>% summarise(across(all_of(as.character(years)), ~ round(mean(.), 0)))
+  overall_total_avg <- round(mean(pivot_df$Total, na.rm = TRUE), 0)
+  overall_avg_avg <- round(mean(pivot_df$Average, na.rm = TRUE), 0)
+  average_row <- data.frame(Quarter = "Average", stringsAsFactors = FALSE)
+  for(y in as.character(years)){
+    average_row[[y]] <- avg_vals[[y]]
+  }
+  average_row$Total <- overall_total_avg
+  average_row$Average <- overall_avg_avg
+  
+  # Combine the original pivot table with the Total and Average rows.
+  combined <- bind_rows(pivot_df, total_row, average_row)
+  
+  # Reorder columns: Quarter, then dynamic year columns, then Total and Average.
+  combined <- combined %>% select(Quarter, all_of(as.character(years)), Total, Average)
+  
+  # Format numeric columns with commas (skip the "Quarter" column).
+  numeric_cols <- setdiff(names(combined), "Quarter")
+  combined[numeric_cols] <- lapply(combined[numeric_cols], function(x) {
+    num <- suppressWarnings(as.numeric(as.character(x)))
+    if(all(is.na(num))) x else formatC(num, format = "f", big.mark = ",", digits = 0)
+  })
+  
+  return(combined)
+}
+
+# (5) Combine the output for the top countries into one string.
+output_tables <- lapply(top_countries, function(country) {
+  tbl <- create_units_table(country, recent_years)
+  header <- paste0("\n ", country, "\n\n")
+  table_html <- kable(tbl, "html", 
+          caption = paste("Number of Units Sold by Quarter for", country),
+          align = c("l", rep("r", ncol(tbl) - 1))
+    ) %>% 
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                    full_width = TRUE, position = "center")
+  paste0(header, table_html)
+})
+
+# Output all tables at once so that they render as HTML tables in the knitted document.
+cat(paste0(output_tables, collapse = "\n"))
+```
+
+## Summary and Recommendations
+Based on the available data, the analysis of Media Distributors, Inc.’s film and music sales reveals a robust revenue generation pattern, with Canada and the United States emerging as the primary contributors to the company’s total sales. Between **`r start_year`** and **`r end_year`**, sales peaked in **`r year_with_most_sales`**, with total revenue reaching **`r format_currency(rev_in_that_year)`** across both business units. Music and film sales contribute **to an extremely unbalanced revenue distribution, with film accounting for the vast majority of total income. Moreover, sales patterns by geography and quarter are heavily skewed toward film in the earlier years.**. The customer base is concentrated in **`r top_countries_cus[1]`**, **`r top_countries_cus[2]`**, and **`r top_countries_cus[3]`**, which also serve as the top-performing markets.
+
+Despite these strengths, Media Distributors, Inc. faces challenges related to its siloed information systems. With plans for acquisition, the company must present a cohesive and integrated business view to appeal to potential buyers. With nearly **`r total_customers`** customers across **`r n_countries`** countries, Media Distributors should invest in customer relationship management (CRM) tools to personalize outreach and foster loyalty. Segmenting customers by preferences (film or music) and spending habits can optimize targeting.

@@ -1,0 +1,5 @@
+DB_NAME=defaultdb
+DB_HOST=mysql-1bae1ab1-shaobochen-9d69.l.aivencloud.com
+DB_PORT=14649
+DB_USER=avnadmin
+DB_PASSWORD=NEW_PASSWORD_HERE
